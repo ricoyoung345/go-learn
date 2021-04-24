@@ -3,6 +3,7 @@ package sync_sort_list
 import (
 	"sync"
 	"sync/atomic"
+	"unsafe"
 )
 
 const (
@@ -22,8 +23,16 @@ type IntNode struct {
 	mu      sync.Mutex
 }
 
+func (n *IntNode) atomicLoadNext() *IntNode {
+	return (*IntNode)(atomic.LoadPointer((*unsafe.Pointer)(unsafe.Pointer(&n.next))))
+}
+
+func (n *IntNode) atomicStoreNext(next *IntNode) {
+	atomic.StorePointer((*unsafe.Pointer)(unsafe.Pointer(&n.next)), unsafe.Pointer(next))
+}
+
 func newIntNode(value int32) *IntNode {
-	return &IntNode{value: &value, deleted: 0}
+	return &IntNode{value: &value, deleted: NodeExist}
 }
 
 func NewInt() *IntList {
@@ -35,17 +44,17 @@ func (l *IntList) Insert(value int) bool {
 	// insert need do a loop to ensure value insert
 	for {
 		a := l.head
-		b := a.next
+		b := a.atomicLoadNext()
 
 		// if list is not empty keep looking
 		// must use atomic.Load, to support one write and multi read
-		for b != nil && atomic.LoadInt32(b.value) < int32(value) {
+		for b != nil && *b.value < int32(value) {
 			a = b
-			b = b.next
+			b = b.atomicLoadNext()
 		}
 
 		// if node aleady exist, just return false
-		if b != nil && atomic.LoadInt32(b.value) == int32(value) {
+		if b != nil && *b.value == int32(value) {
 			return false
 		}
 
@@ -54,14 +63,14 @@ func (l *IntList) Insert(value int) bool {
 		// 1: a.next == b, to ensure that no other goroutine add a node after a
 		// 2: a.marked == true, to ensure that a is not delete by other goroutine
 		a.mu.Lock()
-		if a.next != b || a.deleted == NodeDeleted {
+		if a.atomicLoadNext() != b || a.deleted == NodeDeleted {
 			a.mu.Unlock()
 			continue
 		}
 
 		x := newIntNode(int32(value))
-		x.next = b
-		a.next = x
+		x.atomicStoreNext(b)
+		a.atomicStoreNext(x)
 		a.mu.Unlock()
 
 		// increase l.length atomicly
@@ -76,17 +85,17 @@ func (l *IntList) Delete(value int) bool {
 	// insert need do a loop to ensure value insert
 	for {
 		a := l.head
-		b := a.next
+		b := a.atomicLoadNext()
 
 		// if list is not empty keep looking
 		// must use atomic.Load, to support one write and multi read
-		for b != nil && atomic.LoadInt32(b.value) < int32(value) {
+		for b != nil && *b.value < int32(value) {
 			a = b
-			b = b.next
+			b = b.atomicLoadNext()
 		}
 
 		// if node not exist, just return false
-		if b == nil || atomic.LoadInt32(b.value) != int32(value) {
+		if b == nil || *b.value != int32(value) {
 			return false
 		}
 
@@ -103,14 +112,14 @@ func (l *IntList) Delete(value int) bool {
 		// 1: a.next == b, to ensure that no other goroutine add a node after a
 		// 2: a.marked == true, to ensure that a is not delete by other goroutine
 		a.mu.Lock()
-		if a.next != b || a.deleted == NodeDeleted {
+		if a.atomicLoadNext() != b || a.deleted == NodeDeleted {
 			a.mu.Unlock()
 			b.mu.Unlock()
 			continue
 		}
 
 		atomic.StoreUint32(&b.deleted, NodeDeleted)
-		a.next = b.next
+		a.atomicStoreNext(b.atomicLoadNext())
 
 		a.mu.Unlock()
 		b.mu.Unlock()
@@ -123,28 +132,28 @@ func (l *IntList) Delete(value int) bool {
 }
 
 func (l *IntList) Contains(value int) bool {
-	x := l.head.next
-	for x != nil && atomic.LoadInt32(x.value) < int32(value) {
-		x = x.next
+	x := l.head.atomicLoadNext()
+	for x != nil && *x.value < int32(value) {
+		x = x.atomicLoadNext()
 	}
 
 	if x == nil {
 		return false
 	}
 
-	return atomic.LoadInt32(x.value) == int32(value)
+	return *x.value == int32(value)
 }
 
 func (l *IntList) Range(f func(value int) bool) {
-	x := l.head.next
+	x := l.head.atomicLoadNext()
 	for x != nil {
-		if !f(int(atomic.LoadInt32(x.value))) {
+		if !f(int(*x.value)) {
 			break
 		}
-		x = x.next
+		x = x.atomicLoadNext()
 	}
 }
 
 func (l *IntList) Len() int {
-	return int(l.length)
+	return int(atomic.LoadInt64(&l.length))
 }

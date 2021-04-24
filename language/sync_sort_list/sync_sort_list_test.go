@@ -120,7 +120,6 @@ func TestIntSet(t *testing.T) {
 	if l.Len() != num {
 		t.Fatalf("invalid length expected %d, got %d", num, l.Len())
 	}
-	fmt.Printf("concurrent insert pass")
 
 	// Don't contains 0 after concurrent insertion.
 	if l.Contains(0) {
